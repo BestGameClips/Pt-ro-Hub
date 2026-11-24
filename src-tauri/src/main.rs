@@ -3,14 +3,15 @@ use std::sync::Mutex;
 use serde_json::{Value,json};
 use tauri::State;
 #[derive(Clone)]
-struct Session { base: reqwest::Url, token: String, admin: bool }
+struct Session { base: reqwest::Url, token: String, admin: bool, client: bool, client_token: Option<String> }
 #[derive(Default)]
 struct App(Mutex<Option<Session>>);
 async fn request(s: &Session, route: &str, body: Option<Value>) -> Result<Value,String> {
  let url=s.base.join(route).map_err(|_|"URL invalide")?;
  let client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(20)).build().map_err(|_|"Client HTTP indisponible")?;
+ let token=if route.starts_with("api/client") {s.client_token.as_deref().unwrap_or(&s.token)}else{&s.token};
  let req=if let Some(b)=body {client.post(url).json(&b)} else {client.get(url)};
- let res=req.bearer_auth(&s.token).header("Accept","application/json").send().await.map_err(|_|"Connexion impossible")?;
+ let res=req.bearer_auth(token).header("Accept","application/json").send().await.map_err(|_|"Connexion impossible")?;
  let status=res.status();
  if !status.is_success(){return Err(format!("Erreur HTTP {}",status.as_u16()));}
  if status.as_u16()==204{return Ok(Value::Null);}
@@ -22,8 +23,11 @@ async fn connect(state:State<'_,App>,url:String,token:String,admin:bool)->Result
  let mut base=reqwest::Url::parse(url.trim()).map_err(|_|"URL invalide")?;
  if base.scheme()!="https" || base.host_str().is_none() || !base.username().is_empty() || base.password().is_some(){return Err("HTTPS requis, sans identifiants dans l’URL".into());}
  base.set_path("/");base.set_query(None);base.set_fragment(None);
- let s=Session{base,token:token.trim().into(),admin};
+ let mut s=Session{base,token:token.trim().into(),admin,client:!admin,client_token:None};
+ if s.token.is_empty(){return Err("Clé API requise".into());}
  let result=request(&s,if admin{"api/application/servers"}else{"api/client"},None).await?;
+ if admin && !s.token.starts_with("ptla_"){s.client=request(&s,"api/client",None).await.is_ok();}
+ let result=json!({"inventory":result,"client_access":s.client});
  *state.0.lock().map_err(|_|"Session indisponible")?=Some(s);
  Ok(result)
 }
@@ -39,18 +43,18 @@ async fn inventory(state:State<'_,App>,category:String,page:u32)->Result<Value,S
 fn valid_id(id:&str)->bool{!id.is_empty() && id.len()<=64 && id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-')}
 #[tauri::command]
 async fn resources(state:State<'_,App>,id:String)->Result<Value,String>{
- let s=session(&state)?; if s.admin||!valid_id(&id){return Err("Mode client requis".into());}
+ let s=session(&state)?; if !s.client||!valid_id(&id){return Err("Mode client requis".into());}
  request(&s,&format!("api/client/servers/{id}/resources"),None).await
 }
 #[tauri::command]
 async fn power(state:State<'_,App>,id:String,signal:String)->Result<Value,String>{
- let s=session(&state)?; if s.admin||!valid_id(&id)||!matches!(signal.as_str(),"start"|"stop"|"restart"){return Err("Action invalide".into());}
+ let s=session(&state)?; if !s.client||!valid_id(&id)||!matches!(signal.as_str(),"start"|"stop"|"restart"){return Err("Action invalide".into());}
  request(&s,&format!("api/client/servers/{id}/power"),Some(json!({"signal":signal}))).await
 }
 #[tauri::command]
 async fn server_section(state:State<'_,App>,id:String,section:String,directory:Option<String>)->Result<Value,String>{
  let s=session(&state)?;
- if s.admin||!valid_id(&id){return Err("Mode client requis".into());}
+ if !s.client||!valid_id(&id){return Err("Mode client requis".into());}
  let suffix=match section.as_str(){"backups"=>"backups","schedules"=>"schedules","databases"=>"databases","allocations"=>"network/allocations","subusers"=>"users","files"=>"files/list",_=>return Err("Section inconnue".into())};
  let mut route=format!("api/client/servers/{id}/{suffix}");
  if section=="files"{
@@ -80,7 +84,7 @@ async fn server_section(state:State<'_,App>,id:String,section:String,directory:O
 #[tauri::command]
 async fn console_credentials(state:State<'_,App>,id:String)->Result<Value,String>{
  let s=session(&state)?;
- if s.admin||!valid_id(&id){return Err("Une clé Client API est nécessaire".into());}
+ if !s.client||!valid_id(&id){return Err("Une clé Client API est nécessaire".into());}
  let response=request(&s,&format!("api/client/servers/{id}/websocket"),None).await?;
  let data=response.get("data").ok_or("Réponse WebSocket invalide")?;
  let socket=data.get("socket").and_then(Value::as_str).ok_or("Adresse WebSocket absente")?;
@@ -92,7 +96,18 @@ async fn console_credentials(state:State<'_,App>,id:String)->Result<Value,String
 #[tauri::command]
 async fn console_command(state:State<'_,App>,id:String,command:String)->Result<Value,String>{
  let s=session(&state)?;
- if s.admin||!valid_id(&id)||command.trim().is_empty()||command.len()>4096{return Err("Commande invalide ou mode client requis".into());}
+ if !s.client||!valid_id(&id)||command.trim().is_empty()||command.len()>4096{return Err("Commande invalide ou mode client requis".into());}
  request(&s,&format!("api/client/servers/{id}/command"),Some(json!({"command":command}))).await
 }
-fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power,server_section,console_credentials,console_command]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
+#[tauri::command]
+async fn enable_client(state:State<'_,App>,token:String)->Result<Value,String>{
+ let mut s=session(&state)?;
+ if token.trim().is_empty()||token.starts_with("ptla_"){return Err("Une clé Client API est requise".into());}
+ // Verify the second credential without replacing the administrative session.
+ let mut client=s.clone();client.token=token.trim().into();client.client=true;client.admin=false;
+ request(&client,"api/client",None).await?;
+ s.client=true;s.client_token=Some(client.token);
+ *state.0.lock().map_err(|_|"Session indisponible")?=Some(s);
+ Ok(json!({"client_access":true}))
+}
+fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power,server_section,console_credentials,console_command,enable_client]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
