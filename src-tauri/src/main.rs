@@ -77,4 +77,22 @@ async fn server_section(state:State<'_,App>,id:String,section:String,directory:O
  }).collect();
  Ok(json!({"data":output,"meta":result.get("meta")}))
 }
-fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power,server_section]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
+#[tauri::command]
+async fn console_credentials(state:State<'_,App>,id:String)->Result<Value,String>{
+ let s=session(&state)?;
+ if s.admin||!valid_id(&id){return Err("Une clé Client API est nécessaire".into());}
+ let response=request(&s,&format!("api/client/servers/{id}/websocket"),None).await?;
+ let data=response.get("data").ok_or("Réponse WebSocket invalide")?;
+ let socket=data.get("socket").and_then(Value::as_str).ok_or("Adresse WebSocket absente")?;
+ let url=reqwest::Url::parse(socket).map_err(|_|"Adresse WebSocket invalide")?;
+ if url.scheme()!="wss"||url.host_str().is_none()||!url.username().is_empty()||url.password().is_some(){return Err("WebSocket sécurisé requis".into());}
+ let token=data.get("token").and_then(Value::as_str).ok_or("Jeton WebSocket absent")?;
+ Ok(json!({"socket":socket,"token":token}))
+}
+#[tauri::command]
+async fn console_command(state:State<'_,App>,id:String,command:String)->Result<Value,String>{
+ let s=session(&state)?;
+ if s.admin||!valid_id(&id)||command.trim().is_empty()||command.len()>4096{return Err("Commande invalide ou mode client requis".into());}
+ request(&s,&format!("api/client/servers/{id}/command"),Some(json!({"command":command}))).await
+}
+fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power,server_section,console_credentials,console_command]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
