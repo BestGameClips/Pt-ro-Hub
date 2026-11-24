@@ -1,33 +1,24 @@
 import React,{useState,useEffect,useRef} from 'react';
-import {invoke} from '@tauri-apps/api/core';
+import {invoke,Channel} from '@tauri-apps/api/core';
 export default function ServerConsole({server,onBack,onManage}){
  const [lines,L]=useState([]),[status,S]=useState('Connexion…'),[state,T]=useState('Inconnu'),[stats,M]=useState({}),[command,C]=useState(''),[error,E]=useState(''),[busy,B]=useState(false),[retry,R]=useState(0),[confirm,F]=useState(null),[follow,A]=useState(true);
  const output=useRef(null);
  useEffect(()=>{
-  let stopped=false,ws,timer;
+  let stopped=false,timer,reconnect;
   function append(text){if(!stopped)L(old=>[...old,String(text).slice(0,16000)].slice(-1500))}
   async function connect(){
-   try{
-    const {socket,token}=await invoke('console_credentials',{id:server.id});
-    if(stopped)return;
-    ws=new WebSocket(socket);
-    ws.onopen=()=>{if(!stopped)ws.send(JSON.stringify({event:'auth',args:[token]}))};
-    ws.onmessage=async e=>{if(stopped)return;try{
-     const msg=JSON.parse(e.data);const arg=msg.args?.[0];
-     if(msg.event==='auth success'){S('Connectée');ws.send(JSON.stringify({event:'send logs',args:[null]}));ws.send(JSON.stringify({event:'send stats',args:[null]}))}
-     else if(msg.event==='console output'||msg.event==='install output')append(arg??'');
-     else if(msg.event==='status')T(String(arg));
-     else if(msg.event==='stats'){const v=typeof arg==='string'?JSON.parse(arg):arg;M(v||{});if(v?.state)T(v.state)}
-     else if(msg.event==='token expiring'){const next=await invoke('console_credentials',{id:server.id});if(!stopped&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({event:'auth',args:[next.token]}))}
-     else if(msg.event==='token expired'||msg.event==='jwt error'){S('Authentification expirée');ws.close()}
-    }catch{if(!stopped)E('Message console non traité') }};
-    ws.onerror=()=>{if(!stopped)E('Connexion WebSocket impossible. Vérifiez Wings, HTTPS et les permissions.')};
-    ws.onclose=()=>{if(!stopped)S('Déconnectée')};
-   }catch(e){if(!stopped){S('Déconnectée');E(String(e))}}
+   const channel=new Channel();
+   channel.onmessage=msg=>{if(stopped)return;const arg=msg.args?.[0];try{
+    if(msg.event==='auth success'){S('Connectée');E('')}
+    else if(msg.event==='console output'||msg.event==='install output')append(arg??'');
+    else if(msg.event==='status')T(String(arg));
+    else if(msg.event==='stats'){const v=typeof arg==='string'?JSON.parse(arg):arg;M(v||{});if(v?.state)T(v.state)}
+   }catch{E('Message console non traité')}};
+   try{await invoke('console_stream',{id:server.id,channel});if(!stopped){S('Reconnexion…');reconnect=setTimeout(connect,1000)}}catch(e){if(!stopped){S('Déconnectée');E(String(e))}}
   }
   async function resources(){try{const r=await invoke('resources',{id:server.id});if(!stopped){T(r.attributes?.current_state||'Inconnu');M(r.attributes?.resources||{})}}catch{}}
   L([]);E('');S('Connexion…');connect();resources();timer=setInterval(resources,10000);
-  return()=>{stopped=true;clearInterval(timer);if(ws){ws.onopen=null;ws.onmessage=null;ws.onerror=null;ws.onclose=null;ws.close()}};
+  return()=>{stopped=true;clearInterval(timer);clearTimeout(reconnect)};
  },[server.id,retry]);
  useEffect(()=>{if(follow&&output.current)output.current.scrollTop=output.current.scrollHeight},[lines,follow]);
  async function action(signal){B(true);E('');try{await invoke('power',{id:server.id,signal});F(null)}catch(e){E(String(e))}finally{B(false)}}
