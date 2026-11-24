@@ -1,6 +1,6 @@
 {
   "productName": "PteroHub",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "identifier": "bond.vexel.pterohub",
   "build": {
     "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost wss:"
+      "csp": "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
