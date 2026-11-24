@@ -47,4 +47,34 @@ async fn power(state:State<'_,App>,id:String,signal:String)->Result<Value,String
  let s=session(&state)?; if s.admin||!valid_id(&id)||!matches!(signal.as_str(),"start"|"stop"|"restart"){return Err("Action invalide".into());}
  request(&s,&format!("api/client/servers/{id}/power"),Some(json!({"signal":signal}))).await
 }
-fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
+#[tauri::command]
+async fn server_section(state:State<'_,App>,id:String,section:String,directory:Option<String>)->Result<Value,String>{
+ let s=session(&state)?;
+ if s.admin||!valid_id(&id){return Err("Mode client requis".into());}
+ let suffix=match section.as_str(){"backups"=>"backups","schedules"=>"schedules","databases"=>"databases","allocations"=>"network/allocations","subusers"=>"users","files"=>"files/list",_=>return Err("Section inconnue".into())};
+ let mut route=format!("api/client/servers/{id}/{suffix}");
+ if section=="files"{
+  let dir=directory.unwrap_or_else(||"/".into());
+  let query=reqwest::Url::parse("https://localhost/").map_err(|_|"URL invalide")?;
+  let mut query=query;
+  query.query_pairs_mut().append_pair("directory",&dir);
+  if let Some(q)=query.query(){route.push('?');route.push_str(q);}
+ }
+ let result=request(&s,&route,None).await?;
+ // Return only explicitly selected non-secret metadata, never database credentials.
+ let fields:&[&str]=match section.as_str(){
+ "backups"=>&["uuid","name","bytes","is_successful","is_locked","created_at"],
+ "schedules"=>&["id","name","is_active","is_processing","last_run_at","next_run_at"],
+ "databases"=>&["id","name","host","connections"],
+ "allocations"=>&["id","ip","ip_alias","port","is_default"],
+ "subusers"=>&["uuid","username","email"],
+ "files"=>&["name","size","is_file","modified_at"],_=>&[]};
+ let rows=result.get("data").and_then(Value::as_array).ok_or("Format de réponse inattendu")?;
+ let output:Vec<Value>=rows.iter().map(|item|{
+ let attrs=item.get("attributes").unwrap_or(item);
+ let map:serde_json::Map<String,Value>=fields.iter().filter_map(|k|attrs.get(*k).map(|v|(k.to_string(),v.clone()))).collect();
+ Value::Object(map)
+ }).collect();
+ Ok(json!({"data":output,"meta":result.get("meta")}))
+}
+fn main(){tauri::Builder::default().manage(App::default()).invoke_handler(tauri::generate_handler![connect,disconnect,inventory,resources,power,server_section]).run(tauri::generate_context!()).expect("PteroHub startup failed");}
