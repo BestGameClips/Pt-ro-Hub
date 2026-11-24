@@ -1,6 +1,6 @@
 {
   "productName": "PteroHub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "bond.vexel.pterohub",
   "build": {
     "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
@@ -13,7 +13,9 @@
       {
         "title": "PteroHub",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "minWidth": 760,
+        "minHeight": 540
       }
     ],
     "security": {
